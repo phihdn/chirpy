@@ -15,6 +15,7 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 
+	"github.com/phihdn/chirpy/internal/auth"
 	"github.com/phihdn/chirpy/internal/database"
 )
 
@@ -211,7 +212,8 @@ func main() {
 		"POST /api/users",
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			type parameters struct {
-				Email string `json:"email"`
+				Email    string `json:"email"`
+				Password string `json:"password"`
 			}
 
 			type userResponse struct {
@@ -235,7 +237,7 @@ func main() {
 				return
 			}
 
-			// Validate email format (optional - you can add more validation here)
+			// Validate required fields
 			if params.Email == "" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
@@ -243,8 +245,27 @@ func main() {
 				return
 			}
 
+			if params.Password == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Password is required"})
+				return
+			}
+
+			// Hash the password
+			hashedPassword, err := auth.HashPassword(params.Password)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error hashing password"})
+				return
+			}
+
 			// Create user in database
-			user, err := apiCfg.dbQueries.CreateUser(r.Context(), params.Email)
+			user, err := apiCfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+				Email:          params.Email,
+				HashedPassword: hashedPassword,
+			})
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
@@ -252,7 +273,7 @@ func main() {
 				return
 			}
 
-			// Prepare response
+			// Prepare response (do not include the hashed password)
 			response := userResponse{
 				ID:        user.ID.String(),
 				CreatedAt: user.CreatedAt,
@@ -262,6 +283,69 @@ func main() {
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(response)
+		}),
+	)
+
+	mux.Handle(
+		"POST /api/login",
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			type parameters struct {
+				Email    string `json:"email"`
+				Password string `json:"password"`
+			}
+
+			type userResponse struct {
+				ID        string    `json:"id"`
+				CreatedAt time.Time `json:"created_at"`
+				UpdatedAt time.Time `json:"updated_at"`
+				Email     string    `json:"email"`
+			}
+
+			type errorResponse struct {
+				Error string `json:"error"`
+			}
+
+			decoder := json.NewDecoder(r.Body)
+			params := parameters{}
+			err := decoder.Decode(&params)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
+				return
+			}
+
+			// Look up the user by email
+			user, err := apiCfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
+			if err != nil {
+				// Don't reveal that the user doesn't exist
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Incorrect email or password"})
+				return
+			}
+
+			// Check if the password matches the stored hash
+			err = auth.CheckPasswordHash(user.HashedPassword, params.Password)
+			if err != nil {
+				// Password doesn't match
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Incorrect email or password"})
+				return
+			}
+
+			// Password matches - return the user data (excluding password)
+			response := userResponse{
+				ID:        user.ID.String(),
+				CreatedAt: user.CreatedAt,
+				UpdatedAt: user.UpdatedAt,
+				Email:     user.Email,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(response)
 		}),
 	)
