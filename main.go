@@ -221,10 +221,11 @@ func main() {
 			}
 
 			type userResponse struct {
-				ID        string    `json:"id"`
-				CreatedAt time.Time `json:"created_at"`
-				UpdatedAt time.Time `json:"updated_at"`
-				Email     string    `json:"email"`
+				ID          string    `json:"id"`
+				CreatedAt   time.Time `json:"created_at"`
+				UpdatedAt   time.Time `json:"updated_at"`
+				Email       string    `json:"email"`
+				IsChirpyRed bool      `json:"is_chirpy_red"`
 			}
 
 			type errorResponse struct {
@@ -279,10 +280,11 @@ func main() {
 
 			// Prepare response (do not include the hashed password)
 			response := userResponse{
-				ID:        user.ID.String(),
-				CreatedAt: user.CreatedAt,
-				UpdatedAt: user.UpdatedAt,
-				Email:     user.Email,
+				ID:          user.ID.String(),
+				CreatedAt:   user.CreatedAt,
+				UpdatedAt:   user.UpdatedAt,
+				Email:       user.Email,
+				IsChirpyRed: user.IsChirpyRed,
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -304,6 +306,7 @@ func main() {
 				CreatedAt    time.Time `json:"created_at"`
 				UpdatedAt    time.Time `json:"updated_at"`
 				Email        string    `json:"email"`
+				IsChirpyRed  bool      `json:"is_chirpy_red"`
 				Token        string    `json:"token"`
 				RefreshToken string    `json:"refresh_token"`
 			}
@@ -383,6 +386,7 @@ func main() {
 				CreatedAt:    user.CreatedAt,
 				UpdatedAt:    user.UpdatedAt,
 				Email:        user.Email,
+				IsChirpyRed:  user.IsChirpyRed,
 				Token:        token,
 				RefreshToken: refreshToken,
 			}
@@ -498,10 +502,11 @@ func main() {
 			}
 
 			type userResponse struct {
-				ID        string    `json:"id"`
-				CreatedAt time.Time `json:"created_at"`
-				UpdatedAt time.Time `json:"updated_at"`
-				Email     string    `json:"email"`
+				ID          string    `json:"id"`
+				CreatedAt   time.Time `json:"created_at"`
+				UpdatedAt   time.Time `json:"updated_at"`
+				Email       string    `json:"email"`
+				IsChirpyRed bool      `json:"is_chirpy_red"`
 			}
 
 			type errorResponse struct {
@@ -576,10 +581,11 @@ func main() {
 
 			// Prepare response (do not include the hashed password)
 			response := userResponse{
-				ID:        updatedUser.ID.String(),
-				CreatedAt: updatedUser.CreatedAt,
-				UpdatedAt: updatedUser.UpdatedAt,
-				Email:     updatedUser.Email,
+				ID:          updatedUser.ID.String(),
+				CreatedAt:   updatedUser.CreatedAt,
+				UpdatedAt:   updatedUser.UpdatedAt,
+				Email:       updatedUser.Email,
+				IsChirpyRed: updatedUser.IsChirpyRed,
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -590,6 +596,53 @@ func main() {
 
 	mux.Handle("GET /admin/metrics", http.HandlerFunc(apiCfg.getMetrics))
 	mux.Handle("POST /admin/reset", http.HandlerFunc(apiCfg.resetMetrics))
+
+	mux.Handle(
+		"POST /api/polka/webhooks",
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			type webhookBody struct {
+				Event string `json:"event"`
+				Data  struct {
+					UserID string `json:"user_id"`
+				} `json:"data"`
+			}
+
+			// Parse the request body
+			decoder := json.NewDecoder(r.Body)
+			body := webhookBody{}
+			err := decoder.Decode(&body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			// If it's not a user.upgraded event, return 204
+			if body.Event != "user.upgraded" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
+			// Parse the user ID
+			userID, err := uuid.Parse(body.Data.UserID)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			// Upgrade the user to Chirpy Red
+			_, err = apiCfg.dbQueries.UpgradeUserToChirpyRed(r.Context(), userID)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			w.WriteHeader(http.StatusNoContent)
+		}),
+	)
 
 	mux.Handle(
 		"GET /api/chirps",
@@ -681,6 +734,74 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(response)
+		}),
+	)
+
+	mux.Handle(
+		"DELETE /api/chirps/{chirpID}",
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Get chirp ID from path parameter
+			chirpIDStr := r.PathValue("chirpID")
+
+			type errorResponse struct {
+				Error string `json:"error"`
+			}
+
+			// Extract the bearer token from the Authorization header
+			bearerToken, err := auth.GetBearerToken(r.Header)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Authentication required"})
+				return
+			}
+
+			// Validate the JWT and get the user ID
+			userID, err := auth.ValidateJWT(bearerToken, apiCfg.jwtSecret)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Invalid authentication token"})
+				return
+			}
+
+			// Parse chirp ID into UUID
+			chirpID, err := uuid.Parse(chirpIDStr)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Invalid chirp ID format"})
+				return
+			}
+
+			// First, get the chirp to check if it exists and if the user is the author
+			chirp, err := apiCfg.dbQueries.GetChirpByID(r.Context(), chirpID)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Chirp not found"})
+				return
+			}
+
+			// Check if the user is the author of the chirp
+			if chirp.UserID != userID {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(errorResponse{Error: "You are not authorized to delete this chirp"})
+				return
+			}
+
+			// Delete the chirp
+			err = apiCfg.dbQueries.DeleteChirpByID(r.Context(), chirpID)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error deleting chirp"})
+				return
+			}
+
+			// Return 204 No Content on successful deletion
+			w.WriteHeader(http.StatusNoContent)
 		}),
 	)
 
