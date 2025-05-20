@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -670,7 +671,7 @@ func main() {
 			}
 
 			// Get author_id from query parameters
-			var authorID uuid.UUID
+			authorID := uuid.Nil
 			authorIDStr := r.URL.Query().Get("author_id")
 			if authorIDStr != "" {
 				authorID, err = uuid.Parse(authorIDStr)
@@ -682,8 +683,20 @@ func main() {
 				}
 			}
 
-			// Get chirps from database with optional author filter
-			chirps, err := apiCfg.dbQueries.GetAllChirps(r.Context(), authorID)
+			// Get sort parameter from query string (default to "asc")
+			sortOrder := r.URL.Query().Get("sort")
+			if sortOrder == "" {
+				sortOrder = "asc"
+			}
+			if sortOrder != "asc" && sortOrder != "desc" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Invalid sort parameter. Must be 'asc' or 'desc'"})
+				return
+			}
+
+			// Get all chirps from database
+			chirps, err := apiCfg.dbQueries.GetChirps(r.Context())
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
@@ -691,9 +704,21 @@ func main() {
 				return
 			}
 
+			// Filter by author if specified
+			var filteredChirps []database.Chirp
+			if authorID != uuid.Nil {
+				for _, chirp := range chirps {
+					if chirp.UserID == authorID {
+						filteredChirps = append(filteredChirps, chirp)
+					}
+				}
+			} else {
+				filteredChirps = chirps
+			}
+
 			// Convert the database chirps to response format
-			response := make([]chirpResponse, len(chirps))
-			for i, chirp := range chirps {
+			response := make([]chirpResponse, len(filteredChirps))
+			for i, chirp := range filteredChirps {
 				response[i] = chirpResponse{
 					ID:        chirp.ID.String(),
 					CreatedAt: chirp.CreatedAt,
@@ -702,6 +727,14 @@ func main() {
 					UserID:    chirp.UserID.String(),
 				}
 			}
+
+			// Sort the response array based on the sort parameter
+			sort.Slice(response, func(i, j int) bool {
+				if sortOrder == "asc" {
+					return response[i].CreatedAt.Before(response[j].CreatedAt)
+				}
+				return response[i].CreatedAt.After(response[j].CreatedAt)
+			})
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -737,7 +770,7 @@ func main() {
 			}
 
 			// Get chirp from database
-			chirp, err := apiCfg.dbQueries.GetChirpByID(r.Context(), chirpID)
+			chirp, err := apiCfg.dbQueries.GetChirp(r.Context(), chirpID)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusNotFound)
@@ -798,7 +831,7 @@ func main() {
 			}
 
 			// First, get the chirp to check if it exists and if the user is the author
-			chirp, err := apiCfg.dbQueries.GetChirpByID(r.Context(), chirpID)
+			chirp, err := apiCfg.dbQueries.GetChirp(r.Context(), chirpID)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusNotFound)
@@ -815,7 +848,7 @@ func main() {
 			}
 
 			// Delete the chirp
-			err = apiCfg.dbQueries.DeleteChirpByID(r.Context(), chirpID)
+			err = apiCfg.dbQueries.DeleteChirp(r.Context(), chirpID)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
