@@ -24,6 +24,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	platform       string
 	jwtSecret      string
+	polkaKey       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -94,6 +95,7 @@ func main() {
 	dbUrl := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaKey := os.Getenv("POLKA_KEY")
 
 	db, err := sql.Open("postgres", dbUrl)
 	if err != nil {
@@ -114,6 +116,7 @@ func main() {
 		dbQueries: dbQueries,
 		platform:  platform,
 		jwtSecret: jwtSecret,
+		polkaKey:  polkaKey,
 	}
 
 	fileServerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -607,10 +610,17 @@ func main() {
 				} `json:"data"`
 			}
 
+			// Validate API key
+			apiKey, err := auth.GetAPIKey(r.Header)
+			if err != nil || apiKey != apiCfg.polkaKey {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+
 			// Parse the request body
 			decoder := json.NewDecoder(r.Body)
 			body := webhookBody{}
-			err := decoder.Decode(&body)
+			err = decoder.Decode(&body)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
 				return
