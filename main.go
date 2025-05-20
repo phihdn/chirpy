@@ -23,6 +23,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -92,6 +93,7 @@ func main() {
 	godotenv.Load()
 	dbUrl := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	jwtSecret := os.Getenv("JWT_SECRET")
 
 	db, err := sql.Open("postgres", dbUrl)
 	if err != nil {
@@ -111,6 +113,7 @@ func main() {
 	apiCfg := &apiConfig{
 		dbQueries: dbQueries,
 		platform:  platform,
+		jwtSecret: jwtSecret,
 	}
 
 	fileServerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,8 +132,7 @@ func main() {
 		"POST /api/chirps",
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			type parameters struct {
-				Body   string `json:"body"`
-				UserID string `json:"user_id"`
+				Body string `json:"body"`
 			}
 
 			type errorResponse struct {
@@ -145,9 +147,27 @@ func main() {
 				UserID    string    `json:"user_id"`
 			}
 
+			// Extract the bearer token from the Authorization header
+			bearerToken, err := auth.GetBearerToken(r.Header)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Authentication required"})
+				return
+			}
+
+			// Validate the JWT and get the user ID
+			userID, err := auth.ValidateJWT(bearerToken, apiCfg.jwtSecret)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Invalid authentication token"})
+				return
+			}
+
 			decoder := json.NewDecoder(r.Body)
 			params := parameters{}
-			err := decoder.Decode(&params)
+			err = decoder.Decode(&params)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
@@ -162,24 +182,8 @@ func main() {
 				return
 			}
 
-			if params.UserID == "" {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(errorResponse{Error: "User ID is required"})
-				return
-			}
-
 			// Clean the chirp
 			cleanedBody := cleanChirp(params.Body)
-
-			// Parse UUID from string
-			userID, err := uuid.Parse(params.UserID)
-			if err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(errorResponse{Error: "Invalid user ID format"})
-				return
-			}
 
 			// Create chirp in database
 			chirp, err := apiCfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
@@ -291,8 +295,9 @@ func main() {
 		"POST /api/login",
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			type parameters struct {
-				Email    string `json:"email"`
-				Password string `json:"password"`
+				Email            string `json:"email"`
+				Password         string `json:"password"`
+				ExpiresInSeconds int    `json:"expires_in_seconds,omitempty"`
 			}
 
 			type userResponse struct {
@@ -300,6 +305,7 @@ func main() {
 				CreatedAt time.Time `json:"created_at"`
 				UpdatedAt time.Time `json:"updated_at"`
 				Email     string    `json:"email"`
+				Token     string    `json:"token"`
 			}
 
 			type errorResponse struct {
@@ -336,12 +342,32 @@ func main() {
 				return
 			}
 
-			// Password matches - return the user data (excluding password)
+			// Determine the token expiration time (default: 1 hour)
+			expiresIn := time.Hour // Default expiration time
+			if params.ExpiresInSeconds > 0 {
+				// If client specified a duration, use it (but cap at 1 hour)
+				clientExpiration := time.Duration(params.ExpiresInSeconds) * time.Second
+				if clientExpiration < expiresIn {
+					expiresIn = clientExpiration
+				}
+			}
+
+			// Create JWT token
+			token, err := auth.MakeJWT(user.ID, apiCfg.jwtSecret, expiresIn)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error creating authentication token"})
+				return
+			}
+
+			// Create the response with token
 			response := userResponse{
 				ID:        user.ID.String(),
 				CreatedAt: user.CreatedAt,
 				UpdatedAt: user.UpdatedAt,
 				Email:     user.Email,
+				Token:     token,
 			}
 
 			w.Header().Set("Content-Type", "application/json")
