@@ -669,8 +669,21 @@ func main() {
 				Error string `json:"error"`
 			}
 
-			// Get all chirps from database
-			chirps, err := apiCfg.dbQueries.GetAllChirps(r.Context())
+			// Get author_id from query parameters
+			var authorID uuid.UUID
+			authorIDStr := r.URL.Query().Get("author_id")
+			if authorIDStr != "" {
+				authorID, err = uuid.Parse(authorIDStr)
+				if err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					json.NewEncoder(w).Encode(errorResponse{Error: "Invalid author_id format"})
+					return
+				}
+			}
+
+			// Get chirps from database with optional author filter
+			chirps, err := apiCfg.dbQueries.GetAllChirps(r.Context(), authorID)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
