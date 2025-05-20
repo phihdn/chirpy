@@ -269,6 +269,99 @@ func main() {
 	mux.Handle("GET /admin/metrics", http.HandlerFunc(apiCfg.getMetrics))
 	mux.Handle("POST /admin/reset", http.HandlerFunc(apiCfg.resetMetrics))
 
+	mux.Handle(
+		"GET /api/chirps",
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			type chirpResponse struct {
+				ID        string    `json:"id"`
+				CreatedAt time.Time `json:"created_at"`
+				UpdatedAt time.Time `json:"updated_at"`
+				Body      string    `json:"body"`
+				UserID    string    `json:"user_id"`
+			}
+
+			type errorResponse struct {
+				Error string `json:"error"`
+			}
+
+			// Get all chirps from database
+			chirps, err := apiCfg.dbQueries.GetAllChirps(r.Context())
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error retrieving chirps"})
+				return
+			}
+
+			// Convert the database chirps to response format
+			response := make([]chirpResponse, len(chirps))
+			for i, chirp := range chirps {
+				response[i] = chirpResponse{
+					ID:        chirp.ID.String(),
+					CreatedAt: chirp.CreatedAt,
+					UpdatedAt: chirp.UpdatedAt,
+					Body:      chirp.Body,
+					UserID:    chirp.UserID.String(),
+				}
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(response)
+		}),
+	)
+
+	mux.Handle(
+		"GET /api/chirps/{chirpID}",
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Get chirp ID from path parameter
+			chirpIDStr := r.PathValue("chirpID")
+
+			type chirpResponse struct {
+				ID        string    `json:"id"`
+				CreatedAt time.Time `json:"created_at"`
+				UpdatedAt time.Time `json:"updated_at"`
+				Body      string    `json:"body"`
+				UserID    string    `json:"user_id"`
+			}
+
+			type errorResponse struct {
+				Error string `json:"error"`
+			}
+
+			// Parse chirp ID into UUID
+			chirpID, err := uuid.Parse(chirpIDStr)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Invalid chirp ID format"})
+				return
+			}
+
+			// Get chirp from database
+			chirp, err := apiCfg.dbQueries.GetChirpByID(r.Context(), chirpID)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Chirp not found"})
+				return
+			}
+
+			// Prepare response
+			response := chirpResponse{
+				ID:        chirp.ID.String(),
+				CreatedAt: chirp.CreatedAt,
+				UpdatedAt: chirp.UpdatedAt,
+				Body:      chirp.Body,
+				UserID:    chirp.UserID.String(),
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(response)
+		}),
+	)
+
 	log.Printf("Serving on port: %s\n", port)
 	log.Fatal(srv.ListenAndServe())
 }
