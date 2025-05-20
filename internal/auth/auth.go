@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strings"
@@ -10,6 +12,23 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// MakeRefreshToken generates a cryptographically secure random token
+// It returns a 256-bit (32-byte) hex-encoded string
+func MakeRefreshToken() (string, error) {
+	// Create a byte slice to store the random data
+	randomBytes := make([]byte, 32) // 32 bytes = 256 bits
+
+	// Generate random data using crypto/rand
+	_, err := rand.Read(randomBytes)
+	if err != nil {
+		return "", err
+	}
+
+	// Convert the random bytes to a hex string
+	token := hex.EncodeToString(randomBytes)
+	return token, nil
+}
 
 // HashPassword hashes the password using bcrypt
 func HashPassword(password string) (string, error) {

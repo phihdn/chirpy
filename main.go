@@ -295,17 +295,17 @@ func main() {
 		"POST /api/login",
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			type parameters struct {
-				Email            string `json:"email"`
-				Password         string `json:"password"`
-				ExpiresInSeconds int    `json:"expires_in_seconds,omitempty"`
+				Email    string `json:"email"`
+				Password string `json:"password"`
 			}
 
 			type userResponse struct {
-				ID        string    `json:"id"`
-				CreatedAt time.Time `json:"created_at"`
-				UpdatedAt time.Time `json:"updated_at"`
-				Email     string    `json:"email"`
-				Token     string    `json:"token"`
+				ID           string    `json:"id"`
+				CreatedAt    time.Time `json:"created_at"`
+				UpdatedAt    time.Time `json:"updated_at"`
+				Email        string    `json:"email"`
+				Token        string    `json:"token"`
+				RefreshToken string    `json:"refresh_token"`
 			}
 
 			type errorResponse struct {
@@ -342,18 +342,11 @@ func main() {
 				return
 			}
 
-			// Determine the token expiration time (default: 1 hour)
-			expiresIn := time.Hour // Default expiration time
-			if params.ExpiresInSeconds > 0 {
-				// If client specified a duration, use it (but cap at 1 hour)
-				clientExpiration := time.Duration(params.ExpiresInSeconds) * time.Second
-				if clientExpiration < expiresIn {
-					expiresIn = clientExpiration
-				}
-			}
+			// Access token (JWT) expires in 1 hour
+			accessTokenExpiry := time.Hour
 
 			// Create JWT token
-			token, err := auth.MakeJWT(user.ID, apiCfg.jwtSecret, expiresIn)
+			token, err := auth.MakeJWT(user.ID, apiCfg.jwtSecret, accessTokenExpiry)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
@@ -361,18 +354,138 @@ func main() {
 				return
 			}
 
-			// Create the response with token
+			// Generate refresh token (expires in 60 days)
+			refreshToken, err := auth.MakeRefreshToken()
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error creating refresh token"})
+				return
+			}
+
+			// Store refresh token in database
+			refreshTokenExpiry := time.Now().Add(60 * 24 * time.Hour) // 60 days
+			_, err = apiCfg.dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+				Token:     refreshToken,
+				UserID:    user.ID,
+				ExpiresAt: refreshTokenExpiry,
+			})
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error storing refresh token"})
+				return
+			}
+
+			// Create the response with access token and refresh token
 			response := userResponse{
-				ID:        user.ID.String(),
-				CreatedAt: user.CreatedAt,
-				UpdatedAt: user.UpdatedAt,
-				Email:     user.Email,
-				Token:     token,
+				ID:           user.ID.String(),
+				CreatedAt:    user.CreatedAt,
+				UpdatedAt:    user.UpdatedAt,
+				Email:        user.Email,
+				Token:        token,
+				RefreshToken: refreshToken,
 			}
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(response)
+		}),
+	)
+
+	mux.Handle(
+		"POST /api/refresh",
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			type tokenResponse struct {
+				Token string `json:"token"`
+			}
+
+			type errorResponse struct {
+				Error string `json:"error"`
+			}
+
+			// Extract the bearer token from the Authorization header
+			refreshTokenStr, err := auth.GetBearerToken(r.Header)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Authentication required"})
+				return
+			}
+
+			// Look up the refresh token in the database
+			refreshToken, err := apiCfg.dbQueries.GetRefreshToken(r.Context(), refreshTokenStr)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Invalid refresh token"})
+				return
+			}
+
+			// Check if the token is expired
+			if time.Now().After(refreshToken.ExpiresAt) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Refresh token expired"})
+				return
+			}
+
+			// Check if the token has been revoked
+			if refreshToken.RevokedAt.Valid {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Refresh token revoked"})
+				return
+			}
+
+			// Create a new access token with 1 hour expiration
+			accessTokenExpiry := time.Hour
+			newToken, err := auth.MakeJWT(refreshToken.UserID, apiCfg.jwtSecret, accessTokenExpiry)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error creating authentication token"})
+				return
+			}
+
+			// Respond with the new access token
+			response := tokenResponse{
+				Token: newToken,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(response)
+		}),
+	)
+
+	mux.Handle(
+		"POST /api/revoke",
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			type errorResponse struct {
+				Error string `json:"error"`
+			}
+
+			// Extract the bearer token from the Authorization header
+			refreshTokenStr, err := auth.GetBearerToken(r.Header)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Authentication required"})
+				return
+			}
+
+			// Revoke the refresh token in the database
+			err = apiCfg.dbQueries.RevokeRefreshToken(r.Context(), refreshTokenStr)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error revoking token"})
+				return
+			}
+
+			// Respond with 204 No Content (success, but no body)
+			w.WriteHeader(http.StatusNoContent)
 		}),
 	)
 
