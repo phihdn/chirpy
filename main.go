@@ -489,6 +489,105 @@ func main() {
 		}),
 	)
 
+	mux.Handle(
+		"PUT /api/users",
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			type parameters struct {
+				Email    string `json:"email"`
+				Password string `json:"password"`
+			}
+
+			type userResponse struct {
+				ID        string    `json:"id"`
+				CreatedAt time.Time `json:"created_at"`
+				UpdatedAt time.Time `json:"updated_at"`
+				Email     string    `json:"email"`
+			}
+
+			type errorResponse struct {
+				Error string `json:"error"`
+			}
+
+			// Extract the bearer token from the Authorization header
+			bearerToken, err := auth.GetBearerToken(r.Header)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Authentication required"})
+				return
+			}
+
+			// Validate the JWT and get the user ID
+			userID, err := auth.ValidateJWT(bearerToken, apiCfg.jwtSecret)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Invalid authentication token"})
+				return
+			}
+
+			// Parse the request body
+			decoder := json.NewDecoder(r.Body)
+			params := parameters{}
+			err = decoder.Decode(&params)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Invalid request body"})
+				return
+			}
+
+			// Validate required fields
+			if params.Email == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Email is required"})
+				return
+			}
+
+			if params.Password == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Password is required"})
+				return
+			}
+
+			// Hash the new password
+			hashedPassword, err := auth.HashPassword(params.Password)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error hashing password"})
+				return
+			}
+
+			// Update user in database
+			updatedUser, err := apiCfg.dbQueries.UpdateUser(r.Context(), database.UpdateUserParams{
+				Email:          params.Email,
+				HashedPassword: hashedPassword,
+				ID:             userID,
+			})
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errorResponse{Error: "Error updating user"})
+				return
+			}
+
+			// Prepare response (do not include the hashed password)
+			response := userResponse{
+				ID:        updatedUser.ID.String(),
+				CreatedAt: updatedUser.CreatedAt,
+				UpdatedAt: updatedUser.UpdatedAt,
+				Email:     updatedUser.Email,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(response)
+		}),
+	)
+
 	mux.Handle("GET /admin/metrics", http.HandlerFunc(apiCfg.getMetrics))
 	mux.Handle("POST /admin/reset", http.HandlerFunc(apiCfg.resetMetrics))
 
